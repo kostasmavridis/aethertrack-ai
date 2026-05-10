@@ -5,10 +5,12 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpMethod;
 import org.springframework.security.authentication.AuthenticationManager;
+import org.springframework.security.authentication.dao.DaoAuthenticationProvider;
 import org.springframework.security.config.annotation.authentication.configuration.AuthenticationConfiguration;
 import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
+import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
 import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
@@ -18,57 +20,82 @@ import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 
-import java.util.Arrays;
 import java.util.List;
 
 /**
- * Stateless JWT security configuration.
+ * Spring Security 7 configuration.
  *
- * <p>Public endpoints: POST /api/auth/**, GET /swagger-ui/**, GET /api/v1/api-docs/**, GET /actuator/health
- * <p>All other endpoints require a valid Bearer JWT.
+ * <p>Strategy:
+ * <ul>
+ *   <li>Stateless JWT — no HTTP sessions.</li>
+ *   <li>CSRF disabled (tokens make it unnecessary for pure APIs).</li>
+ *   <li>Public routes: auth endpoints, Swagger UI, Actuator health, SSE stream.</li>
+ *   <li>All other routes require authentication.</li>
+ *   <li>ADMIN-only routes protected via {@code @PreAuthorize} on service methods.</li>
+ * </ul>
  */
 @Configuration
 @EnableWebSecurity
 @EnableMethodSecurity
 public class SecurityConfig {
 
-  private final JwtAuthFilter jwtAuthFilter;
+  private final AppUserDetailsService userDetailsService;
+  private final JwtAuthenticationFilter jwtFilter;
 
-  @Value("${aethertrack.security.cors.allowed-origins}")
-  private String allowedOriginsRaw;
+  @Value("${aethertrack.security.cors.allowed-origins:http://localhost:5173}")
+  private String allowedOrigins;
 
-  public SecurityConfig(JwtAuthFilter jwtAuthFilter) {
-    this.jwtAuthFilter = jwtAuthFilter;
+  public SecurityConfig(
+      AppUserDetailsService userDetailsService,
+      JwtAuthenticationFilter jwtFilter) {
+    this.userDetailsService = userDetailsService;
+    this.jwtFilter          = jwtFilter;
   }
 
   @Bean
   public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
     return http
-        .csrf(csrf -> csrf.disable())
+        .csrf(AbstractHttpConfigurer::disable)
         .cors(cors -> cors.configurationSource(corsConfigurationSource()))
-        .sessionManagement(session ->
-            session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+        .sessionManagement(sm ->
+            sm.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
         .authorizeHttpRequests(auth -> auth
-            // Auth endpoints — public
-            .requestMatchers(HttpMethod.POST, "/api/auth/**").permitAll()
-            // OpenAPI / Swagger — public
+            // ── Public ────────────────────────────────────────────────────
             .requestMatchers(
+                "/api/auth/**",
+                "/api/events",                       // SSE — clients subscribe before login
+                "/actuator/health",
+                "/actuator/info",
+                "/v3/api-docs/**",
                 "/swagger-ui/**",
-                "/swagger-ui.html",
-                "/api/v1/api-docs/**",
-                "/api/v1/api-docs"
+                "/swagger-ui.html"
             ).permitAll()
-            // Actuator health — public
-            .requestMatchers("/actuator/health").permitAll()
-            // Prometheus metrics — ADMIN only
-            .requestMatchers("/actuator/**").hasRole("ADMIN")
-            // SSE stream — authenticated
-            .requestMatchers("/api/events/**").authenticated()
-            // Everything else — authenticated
+
+            // ── ADMIN only ────────────────────────────────────────────────
+            .requestMatchers(
+                "/actuator/**"
+            ).hasRole("ADMIN")
+
+            // ── Authenticated ─────────────────────────────────────────────
             .anyRequest().authenticated()
         )
-        .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class)
+        .authenticationProvider(authenticationProvider())
+        .addFilterBefore(jwtFilter, UsernamePasswordAuthenticationFilter.class)
         .build();
+  }
+
+  @Bean
+  public DaoAuthenticationProvider authenticationProvider() {
+    var provider = new DaoAuthenticationProvider();
+    provider.setUserDetailsService(userDetailsService);
+    provider.setPasswordEncoder(passwordEncoder());
+    return provider;
+  }
+
+  @Bean
+  public AuthenticationManager authenticationManager(
+      AuthenticationConfiguration config) throws Exception {
+    return config.getAuthenticationManager();
   }
 
   @Bean
@@ -77,23 +104,16 @@ public class SecurityConfig {
   }
 
   @Bean
-  public AuthenticationManager authenticationManager(
-      AuthenticationConfiguration authenticationConfiguration) throws Exception {
-    return authenticationConfiguration.getAuthenticationManager();
-  }
-
-  @Bean
   public CorsConfigurationSource corsConfigurationSource() {
-    CorsConfiguration config = new CorsConfiguration();
-    List<String> origins = Arrays.stream(allowedOriginsRaw.split(","))
-        .map(String::trim)
-        .toList();
-    config.setAllowedOrigins(origins);
-    config.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE", "OPTIONS"));
+    var config = new CorsConfiguration();
+    config.setAllowedOriginPatterns(List.of(allowedOrigins.split(",")));
+    config.setAllowedMethods(List.of("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"));
     config.setAllowedHeaders(List.of("*"));
+    config.setExposedHeaders(List.of("Authorization", "Location"));
     config.setAllowCredentials(true);
+    config.setMaxAge(3600L);
 
-    UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
+    var source = new UrlBasedCorsConfigurationSource();
     source.registerCorsConfiguration("/**", config);
     return source;
   }

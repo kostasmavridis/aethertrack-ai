@@ -1,39 +1,37 @@
 package com.aethertrack.api.security;
 
-import com.aethertrack.core.repository.AppUserRepository;
+import com.aethertrack.core.repository.UserRepository;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
-import org.springframework.security.core.userdetails.User;
-import org.springframework.security.core.userdetails.UserDetails;
-import org.springframework.security.core.userdetails.UserDetailsService;
-import org.springframework.security.core.userdetails.UsernameNotFoundException;
+import org.springframework.security.core.userdetails.*;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
 
 /**
- * Loads user details from the database for Spring Security authentication.
+ * Loads a {@link UserDetails} by username from the database.
+ * Spring Security calls this during authentication and token validation.
  */
 @Service
 public class AppUserDetailsService implements UserDetailsService {
 
-  private final AppUserRepository appUserRepository;
+  private final UserRepository userRepository;
 
-  public AppUserDetailsService(AppUserRepository appUserRepository) {
-    this.appUserRepository = appUserRepository;
+  public AppUserDetailsService(UserRepository userRepository) {
+    this.userRepository = userRepository;
   }
 
   @Override
+  @Transactional(readOnly = true)
   public UserDetails loadUserByUsername(String username) throws UsernameNotFoundException {
-    var user = appUserRepository.findByUsername(username)
+    return userRepository.findByUsername(username)
+        .map(user -> new org.springframework.security.core.userdetails.User(
+            user.getUsername(),
+            user.getPasswordHash(),
+            user.isEnabled(),
+            true, true, true,
+            List.of(new SimpleGrantedAuthority("ROLE_" + user.getRole().name()))
+        ))
         .orElseThrow(() -> new UsernameNotFoundException("User not found: " + username));
-
-    return new User(
-        user.getUsername(),
-        user.getPasswordHash(),
-        user.isActive(),
-        true,
-        true,
-        true,
-        List.of(new SimpleGrantedAuthority("ROLE_" + user.getRole().name())));
   }
 }

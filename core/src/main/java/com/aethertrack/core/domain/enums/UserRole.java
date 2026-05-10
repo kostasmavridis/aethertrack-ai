@@ -1,10 +1,10 @@
 package com.aethertrack.core.domain.enums;
 
-/** Roles available for application users. */
+/** Authority roles for the AetherTrack application. */
 public enum UserRole {
-  /** Standard user — can manage their own services and profiles. */
+  /** Standard user — can manage their own services, profiles, and cycles. */
   USER,
 
-  /** Administrator — full access including other users' data. */
+  /** Administrator — full read/write across all resources. */
   ADMIN
 }

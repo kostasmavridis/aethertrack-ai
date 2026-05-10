@@ -1,131 +1,110 @@
 package com.aethertrack.api.controller;
 
-import com.aethertrack.api.dto.AuthResponse;
-import com.aethertrack.api.dto.LoginRequest;
-import com.aethertrack.api.dto.RegisterRequest;
-import com.aethertrack.api.security.JwtUtil;
-import com.aethertrack.core.domain.AppUser;
-import com.aethertrack.core.repository.AppUserRepository;
+import com.aethertrack.api.dto.*;
+import com.aethertrack.api.security.JwtTokenProvider;
+import com.aethertrack.core.domain.User;
+import com.aethertrack.core.repository.UserRepository;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.Authentication;
-import org.springframework.security.core.userdetails.UserDetails;
+import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.web.bind.annotation.*;
-
-import java.net.URI;
 
 /**
  * Authentication endpoints.
  *
- * <p>Public routes:
  * <ul>
- *   <li>{@code POST /api/auth/register} — create a new account</li>
- *   <li>{@code POST /api/auth/login}    — obtain a JWT</li>
- *   <li>{@code POST /api/auth/refresh}  — exchange a valid JWT for a fresh one</li>
+ *   <li>{@code POST /api/auth/register} — create a new user account</li>
+ *   <li>{@code POST /api/auth/login}    — exchange credentials for tokens</li>
+ *   <li>{@code POST /api/auth/refresh}  — exchange a refresh token for a new access token</li>
  * </ul>
  */
 @RestController
 @RequestMapping("/api/auth")
-@Tag(name = "Authentication", description = "Register, login, and refresh JWT tokens")
+@Tag(name = "Auth", description = "Registration, login, and token refresh")
 public class AuthController {
 
-  private final AuthenticationManager authenticationManager;
-  private final AppUserRepository appUserRepository;
-  private final PasswordEncoder passwordEncoder;
-  private final JwtUtil jwtUtil;
+  private final AuthenticationManager authManager;
+  private final JwtTokenProvider      jwtProvider;
+  private final UserRepository        userRepository;
+  private final PasswordEncoder       passwordEncoder;
 
   public AuthController(
-      AuthenticationManager authenticationManager,
-      AppUserRepository appUserRepository,
-      PasswordEncoder passwordEncoder,
-      JwtUtil jwtUtil) {
-    this.authenticationManager = authenticationManager;
-    this.appUserRepository = appUserRepository;
+      AuthenticationManager authManager,
+      JwtTokenProvider jwtProvider,
+      UserRepository userRepository,
+      PasswordEncoder passwordEncoder) {
+    this.authManager     = authManager;
+    this.jwtProvider     = jwtProvider;
+    this.userRepository  = userRepository;
     this.passwordEncoder = passwordEncoder;
-    this.jwtUtil = jwtUtil;
   }
 
-  // ── Register ────────────────────────────────────────────────────────────
+  // ── Register ──────────────────────────────────────────────────────────────
 
   @PostMapping("/register")
   @Operation(summary = "Register a new user account")
   public ResponseEntity<AuthResponse> register(@RequestBody RegisterRequest request) {
-    if (appUserRepository.existsByUsername(request.username())) {
+    if (userRepository.existsByUsername(request.username())) {
       throw new IllegalArgumentException("Username already taken: " + request.username());
     }
-    if (appUserRepository.existsByEmail(request.email())) {
+    if (userRepository.existsByEmail(request.email())) {
       throw new IllegalArgumentException("Email already registered: " + request.email());
     }
 
-    AppUser user = new AppUser(
-        request.email(),
+    User user = new User(
         request.username(),
+        request.email(),
         passwordEncoder.encode(request.password()));
-    AppUser saved = appUserRepository.save(user);
+    userRepository.save(user);
 
-    String token = jwtUtil.generateToken(
-        saved.getUsername(), saved.getRole().name(), saved.getId());
-
-    return ResponseEntity
-        .created(URI.create("/api/auth/me"))
-        .body(new AuthResponse(
-            token,
-            saved.getUsername(),
-            saved.getRole().name(),
-            jwtUtil.extractExpiry(token)));
+    return ResponseEntity.ok(issueTokens(request.username(), user.getRole().name()));
   }
 
-  // ── Login ───────────────────────────────────────────────────────────────
+  // ── Login ─────────────────────────────────────────────────────────────────
 
   @PostMapping("/login")
-  @Operation(summary = "Authenticate and obtain a JWT")
+  @Operation(summary = "Authenticate and receive JWT tokens")
   public ResponseEntity<AuthResponse> login(@RequestBody LoginRequest request) {
-    Authentication authentication = authenticationManager.authenticate(
+    Authentication auth = authManager.authenticate(
         new UsernamePasswordAuthenticationToken(request.username(), request.password()));
 
-    UserDetails userDetails = (UserDetails) authentication.getPrincipal();
-    AppUser user = appUserRepository.findByUsername(userDetails.getUsername())
-        .orElseThrow();
+    String role = auth.getAuthorities().stream()
+        .map(GrantedAuthority::getAuthority)
+        .findFirst()
+        .orElse("ROLE_USER")
+        .replace("ROLE_", "");
 
-    String token = jwtUtil.generateToken(
-        user.getUsername(), user.getRole().name(), user.getId());
-
-    return ResponseEntity.ok(new AuthResponse(
-        token,
-        user.getUsername(),
-        user.getRole().name(),
-        jwtUtil.extractExpiry(token)));
+    return ResponseEntity.ok(issueTokens(request.username(), role));
   }
 
-  // ── Refresh ─────────────────────────────────────────────────────────────
+  // ── Refresh ───────────────────────────────────────────────────────────────
 
   @PostMapping("/refresh")
-  @Operation(summary = "Exchange a valid (non-expired) JWT for a fresh one")
-  public ResponseEntity<AuthResponse> refresh(
-      @RequestHeader("Authorization") String authHeader) {
+  @Operation(summary = "Exchange a refresh token for a new access token")
+  public ResponseEntity<AuthResponse> refresh(@RequestBody RefreshTokenRequest request) {
+    String token = request.refreshToken();
 
-    if (authHeader == null || !authHeader.startsWith("Bearer ")) {
-      throw new IllegalArgumentException("Missing or malformed Authorization header");
-    }
-    String oldToken = authHeader.substring(7);
-    if (!jwtUtil.isValid(oldToken)) {
-      throw new IllegalArgumentException("Token is invalid or expired");
+    if (!jwtProvider.validateToken(token) || !jwtProvider.isRefreshToken(token)) {
+      throw new IllegalArgumentException("Invalid or expired refresh token");
     }
 
-    String username = jwtUtil.extractUsername(oldToken);
-    AppUser user = appUserRepository.findByUsername(username).orElseThrow();
+    String username = jwtProvider.extractUsername(token);
+    User user = userRepository.findByUsername(username)
+        .orElseThrow(() -> new IllegalArgumentException("User not found: " + username));
 
-    String newToken = jwtUtil.generateToken(
-        user.getUsername(), user.getRole().name(), user.getId());
+    return ResponseEntity.ok(issueTokens(username, user.getRole().name()));
+  }
 
-    return ResponseEntity.ok(new AuthResponse(
-        newToken,
-        user.getUsername(),
-        user.getRole().name(),
-        jwtUtil.extractExpiry(newToken)));
+  // ── helpers ───────────────────────────────────────────────────────────────
+
+  private AuthResponse issueTokens(String username, String role) {
+    String access  = jwtProvider.generateAccessToken(username, role);
+    String refresh = jwtProvider.generateRefreshToken(username);
+    return new AuthResponse(access, refresh, jwtProvider.extractExpiry(access), username, role);
   }
 }
