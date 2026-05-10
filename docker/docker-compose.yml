@@ -1,0 +1,161 @@
+# ============================================================
+# AetherTrack AI — Docker Compose v2 Full Stack
+# ============================================================
+# Usage:
+#   cp ../.env.example ../.env  # fill in secrets
+#   docker compose up -d
+# ============================================================
+
+name: aethertrack
+
+services:
+
+  # ── Spring Boot Application ────────────────────────────────
+  app:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: aethertrack-app
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:-dev}
+      DB_HOST: postgres
+      DB_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-aethertrack}
+      POSTGRES_USER: ${POSTGRES_USER:-aethertrack}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      MAIL_HOST: mailhog
+      MAIL_PORT: 1025
+      JWT_SECRET: ${JWT_SECRET:-insecure-dev-secret}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - aethertrack-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # ── PostgreSQL 18 ──────────────────────────────────────────
+  postgres:
+    image: postgres:18-alpine
+    container_name: aethertrack-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-aethertrack}
+      POSTGRES_USER: ${POSTGRES_USER:-aethertrack}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - aethertrack-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-aethertrack} -d ${POSTGRES_DB:-aethertrack}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis 7 ────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: aethertrack-redis
+    ports:
+      - "6379:6379"
+    command: >-
+      sh -c "[ -n '${REDIS_PASSWORD}' ]
+             && redis-server --requirepass '${REDIS_PASSWORD}'
+             || redis-server"
+    volumes:
+      - redis-data:/data
+    networks:
+      - aethertrack-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── MailHog (dev mail catcher) ─────────────────────────────
+  mailhog:
+    image: mailhog/mailhog:latest
+    container_name: aethertrack-mailhog
+    ports:
+      - "1025:1025"   # SMTP
+      - "8025:8025"   # Web UI
+    networks:
+      - aethertrack-net
+    restart: unless-stopped
+
+  # ── Prometheus ─────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: aethertrack-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.enable-lifecycle"
+    networks:
+      - aethertrack-net
+    restart: unless-stopped
+
+  # ── Grafana ────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:latest
+    container_name: aethertrack-grafana
+    ports:
+      - "3001:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - prometheus
+    networks:
+      - aethertrack-net
+    restart: unless-stopped
+
+  # ── Nginx (reverse proxy + UI server) ─────────────────────
+  nginx:
+    image: nginx:alpine
+    container_name: aethertrack-nginx
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - app
+    networks:
+      - aethertrack-net
+    restart: unless-stopped
+
+# ── Volumes ────────────────────────────────────────────────────
+volumes:
+  postgres-data:
+  redis-data:
+  prometheus-data:
+  grafana-data:
+
+# ── Networks ───────────────────────────────────────────────────
+networks:
+  aethertrack-net:
+    driver: bridge
